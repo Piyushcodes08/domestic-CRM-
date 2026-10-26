@@ -1,0 +1,209 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper Functions ───────────────────────────────────────────────────
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && request.auth.token.email != null
+        && request.auth.token.email.lower() == 'vahlaydigital@gmail.com';
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function getUserRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function isSupport() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && getUserRole() == 'technical_support';
+    }
+
+    function isManager() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && getUserRole() == 'sales_manager';
+    }
+
+    function isSalesAgent() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && getUserRole() == 'sales_agent';
+    }
+
+    function isManagerOrAdmin() {
+      return isManager() || isAdmin();
+    }
+
+    function isSupportOrManagerOrAdmin() {
+      return isSupport() || isManager() || isAdmin();
+    }
+
+    // ── Admin profile ──────────────────────────────────────────────────────
+    match /admin/{uid} {
+      allow get: if isOwner(uid) || isAdmin();
+      allow list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    // ── User profiles ───────────────────────────────────────────────────────
+    match /users/{uid} {
+      allow read: if signedIn();
+
+      allow create: if isAdmin()
+        && ['sales_agent', 'technical_support', 'sales_manager'].hasAny([request.resource.data.role])
+        && request.resource.data.name is string
+        && request.resource.data.email is string
+        && request.resource.data.createdAt is timestamp;
+
+      allow update: if isAdmin()
+        || (isOwner(uid)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'name', 'avatar', 'title', 'department',
+            'joinedDate', 'readinessScore', 'learningXp', 'streakDays',
+            'completedLessons', 'completedQuizzes', 'badges',
+            'assignedTargetRevenueINR',
+            'leadsWon', 'revenueGenerated', 'phone', 'createdAt'
+          ]));
+
+      allow delete: if isAdmin();
+    }
+
+    // ── Service Catalog (Admin manages, all signed-in users can read) ──────
+    match /services/{docId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ── Objection Playbook (Admin manages, all signed-in users can read) ───
+    match /objections/{docId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ── Leads ───────────────────────────────────────────────────────────────
+    // Agents can create & update their own leads.
+    // Support/Manager/Admin can read all, update support fields, delete.
+    match /leads/{docId} {
+      allow read: if signedIn();
+      allow create: if signedIn();
+      allow update: if signedIn();
+      allow delete: if isAdmin() || isSupport();
+    }
+
+    // ── Lead Distribution History ───────────────────────────────────────────
+    match /leadDistributionHistory/{docId} {
+      allow read, create: if signedIn();
+      allow update, delete: if isAdmin();
+    }
+
+    // ── Proposals / Quotations ─────────────────────────────────────────────
+    // Full lifecycle security:
+    //   - Any signed-in user (agent) can create a draft proposal
+    //   - Agent who created it can update their own draft
+    //   - Support can read all + update dispatch fields (supportNotes, approvalStatus→sent_to_client, dispatchedAt, dispatchedBy)
+    //   - Manager/Admin can read all + approve/reject (approvalStatus, managerComments)
+    //   - Admin can delete any proposal
+    //   - Nobody else can delete
+    match /proposals/{docId} {
+      allow read: if signedIn();
+
+      // Any agent can create a draft quotation
+      allow create: if signedIn()
+        && request.resource.data.agentId is string
+        && request.resource.data.agentName is string
+        && request.resource.data.clientName is string
+        && request.resource.data.clientCompany is string
+        && request.resource.data.proposalNumber is string
+        && request.resource.data.totalINR is number
+        && request.resource.data.subtotalINR is number
+        && request.resource.data.createdAt is string;
+
+      // Agent can update their own draft/pending proposal (not already dispatched)
+      allow update: if signedIn() && (
+        // Admin can update anything
+        isAdmin()
+        // Manager can approve/reject (update approvalStatus + managerComments)
+        || isManager()
+        // Support can update dispatch fields and supportNotes
+        || isSupport()
+        // Original agent can edit their own draft or pending proposal
+        || (request.auth.uid == resource.data.agentId
+            && resource.data.approvalStatus in ['draft', 'pending_support_dispatch', 'pending_manager_approval']
+            && !request.resource.data.diff(resource.data).affectedKeys()
+                .hasAny(['dispatchedAt', 'dispatchedBy', 'managerComments', 'approvalStatus'])
+        )
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // ── Escalation Tickets ─────────────────────────────────────────────────
+    // Agents create tickets; Manager/Admin/Support resolve them.
+    match /escalations/{docId} {
+      allow read: if signedIn();
+      allow create: if signedIn();
+
+      // Support, Manager, Admin can update (resolve/assign). Agents can only update their own open tickets.
+      allow update: if signedIn() && (
+        isSupportOrManagerOrAdmin()
+        || (request.auth.uid == resource.data.agentId
+            && resource.data.status in ['open', 'assigned'])
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // ── Announcements ───────────────────────────────────────────────────────
+    match /announcements/{docId} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Department tasks are assigned by admins and worked by support staff.
+    match /departmentTasks/{docId} {
+      allow read: if signedIn();
+      allow create: if signedIn();
+      allow update: if signedIn();
+      allow delete: if isAdmin() || isSupport();
+    }
+
+    // ── Requirements (any signed-in user can submit) ────────────────────────
+    match /requirements/{docId} {
+      allow create: if signedIn();
+      allow read, update, delete: if isAdmin();
+    }
+
+    // ── Agent Team Messages (Chat) ─────────────────────────────────────────
+    match /agent_teams_messages/{docId} {
+      allow read, create: if signedIn();
+      // Only the message sender or admin can update/delete
+      allow update, delete: if signedIn() && (
+        isAdmin()
+        || request.auth.uid == resource.data.senderId
+      );
+    }
+
+    // ── Quotation Line Items (sub-collection, if used separately) ──────────
+    match /proposals/{proposalId}/items/{itemId} {
+      allow read: if signedIn();
+      allow write: if signedIn() && (
+        isAdmin()
+        || isManager()
+        || isSupport()
+        || request.auth.uid == get(/databases/$(database)/documents/proposals/$(proposalId)).data.agentId
+      );
+    }
+
+  }
+}

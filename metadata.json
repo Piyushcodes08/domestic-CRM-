@@ -1,0 +1,6 @@
+{
+  "name": "Vahlay Digital Sales Academy & Sales Enablement System",
+  "description": "Enterprise sales training, live AI sales copilot, objection handling, mock customer call simulator, and sales enablement platform for Vahlay Digital.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
